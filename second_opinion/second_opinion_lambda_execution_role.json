@@ -1,0 +1,72 @@
+{
+  "AWSTemplateFormatVersion":"2010-09-09",
+  "Description":"Second opinion lambda execution role",
+  "Resources":{
+    "Role":{
+      "Type":"AWS::IAM::Role",
+      "Properties":{
+        "RoleName": "second_opinion",
+        "AssumeRolePolicyDocument":{
+          "Version":"2012-10-17",
+          "Statement":[
+            {
+              "Effect":"Allow",
+              "Action":"sts:AssumeRole",
+              "Principal":{
+                "Service": [
+                  "lambda.amazonaws.com",
+                  "events.amazonaws.com",
+                  "apigateway.amazonaws.com"
+                ]
+              }
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName":"CredstashReader",
+            "PolicyDocument":{
+              "Version":"2012-10-17",
+              "Statement":[
+                {
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:Query",
+                    "dynamodb:Scan"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": {"Fn::Join":["",["arn:aws:dynamodb:*:",{"Ref":"AWS::AccountId"},":table/credential-store"]]}
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName":"Zappa",
+            "PolicyDocument":{
+              "Version":"2012-10-17",
+              "Statement":[
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:*"
+                  ],
+                  "Resource": "arn:aws:logs:*:*:*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "lambda:InvokeFunction"
+                  ],
+                  "Resource": "*"
+                },
+              ]
+            }
+          },
+        ]
+      }
+    }
+  }
+}

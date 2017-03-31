@@ -1,0 +1,13 @@
+{
+    "dev": {
+        "app_function": "app.app", 
+        "s3_bucket": "infosec-dev-zappa",
+        "manage_roles": false, // Disable Zappa client managing roles.
+        "role_name": "second_opinion", // Name of your Zappa execution role. Default ZappaExecutionRole.
+        "keep_warm": false,
+        "lambda_description": "Second Opinion",
+        "project_name": "second-opinion",
+        // "debug": true,
+        "apigateway_description": "Second Opinion"
+    }
+}
