@@ -1,3 +1,30 @@
+urllib3[secure]
 duo_web
 credstash
 boto3
+flask
+joblib
+gnupg
+
+# Pulling from master to get the fix to this bug ( https://github.com/OpenIDC/pyoidc/pull/317 ) which is not present in v0.10.0 in pip
+git+https://github.com/OpenIDC/pyoidc.git
+
+# The cryptography lambda package doesn't work https://github.com/Miserlou/lambda-packages/issues/41#issuecomment-304079770
+# So to workaround while we wait for this PR to be merged ( https://github.com/Miserlou/lambda-packages/pull/40 )
+# This must precede the installation of zappa in requirements.txt
+git+https://github.com/gene1wood/lambda-packages.git@update-cryptography-to-1.8.1
+
+# To workaround https://github.com/Miserlou/Zappa/issues/818 we need at least commit 0052d72bca7db298e28a2db46bfb3c3f09391a6b
+# But we can't go back that far as then it breaks the new python 3 zappa stuff so we'll try master?
+# And because Zappa requirements.txt fixes all package version numbers we need to use a working copy that requests lambda-packages 0.15.1
+/home/gene/code/github.com/gene1wood/Zappa/
+# git+https://github.com/Miserlou/Zappa.git
+
+# This PR hasn't yet been merged and so the custom domain name doesn't work
+# https://github.com/Miserlou/Zappa/issues/762
+# and to workaround it we need to manually create the route53 CNAME
+
+# To workaround https://github.com/boto/botocore/issues/1148
+# And we have to run against botocore 1.5.40 because Doppins PRs aren't merging
+# https://github.com/Miserlou/Zappa/pull/796
+git+https://github.com/gene1wood/botocore.git@temp-credential-cache-on-1.5.40

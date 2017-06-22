@@ -26,6 +26,139 @@ Assuming you have your Duo secrets stored in 4 files :
 
 Note : Since KMS grants are only eventually consistent, second-opinion won't immediately have access to these credstash credentials after granting it access to them
 
+## To get certs
+
+
+    rp_name=rp.example.com
+    op_name=op.example.com
+    email=user@example.com
+    
+    virtualenv venv-getcert
+    mkdir getcert
+    venv-getcert/bin/pip install certbot certbot-route53 git+https://github.com/gene1wood/botocore.git@persistent-credential-cache-with-serialization
+    venv-getcert/bin/certbot certonly -n --agree-tos --email $email -a certbot-route53:auth -d $rp_name -d $op_name --config-dir getcert/ --work-dir getcert/ --logs-dir getcert/
+
+## To create OIDC OP Keys
+
+1. Generate keys and store the resulting JSON in credstash
+
+
+    region="us-west-2"
+    credstash_key_id="`aws --region $region kms list-aliases --query "Aliases[?AliasName=='alias/credstash'].TargetKeyId | [0]" --output text`"
+
+    # Add a credential to the store
+    python tools/generate_new_op_keys.py | credstash --region $region put --autoversion second-opinion:opkeys - application=second-opinion
+
+2. Generate a SECRET_KEY for Flask
+
+
+    region="us-west-2"
+    credstash_key_id="`aws --region $region kms list-aliases --query "Aliases[?AliasName=='alias/credstash'].TargetKeyId | [0]" --output text`"
+    echo "import string, random;print(''.join(random.SystemRandom().choice(string.printable) for _ in range(24)))" | python | credstash --region $region put --autoversion second-opinion:secret-key - application=second-opinion
+
+
+# Run locally
+
+    FLASK_APP=app.py AWS_DEFAULT_PROFILE="infosec-dev-admin" venv-zappa/bin/flask run
+
+## RP
+
+    PATH=/usr/local/openresty/nginx/sbin:$PATH
+    cd /usr/local/openresty/nginx
+    pkill nginx; nginx -p `pwd`/ -c /usr/local/openresty/nginx/conf/nginx.conf
+
+## DNS
+
+Create DNS entries for the RP and OP in route53
+
+# Deploy with zappa
+
+* Create a virtualenv for zappa
+* Install zappa into the virtualenv and install second-opinion requirements and zappa (into the same virtualenv)
+
+      venv-zappa2/bin/pip install -r ../second_opinion/requirements.txt
+
+* Certify
+
+      ../.sandbox/venv-zappa2/bin/zappa certify
+    
+* Deploy?
+
+      . ../.sandbox/venv-zapp2/bin/activate
+      zappa deploy dev
+
+* Create route53 CNAME to workaround https://github.com/Miserlou/Zappa/issues/762
+
+# Usage
+
+## Create new RP clients
+
+1. Generate a client_id and secret, storing the secret in credstash
+
+
+    $python tools/add_client.py
+    
+    Enter redirect_uris one at the time, end with a blank line: 
+    ?: https://rp.example.com/second-opinion/redirect_uri
+    ?: 
+    Enter policy_uri or just return: 
+    Enter logo_uri or just return: 
+    Enter jwks_uri or just return: 
+    
+    Share the following information with the client through a secure channel
+    
+    Client ID : S7Zje9nuBfyb
+    Client Secret : b1b01ccc92c38231ff7b0c359cfda6f3fae56e4eba610ef3ff7c9bff
+    Allowed redirect URIs: [['https://rp.example.com/second-opinion/redirect_uri', None]]
+    
+    Add the following new client information to the config
+    {
+      "OP_CLIENT_DB": {
+        "S7Zje9nuBfyb": {
+          "redirect_uris": [
+            [
+              "https://rp.example.com/second-opinion/redirect_uri", 
+              null
+            ]
+          ], 
+          "client_salt": "Cf9hEwEs", 
+          "client_id": "S7Zje9nuBfyb",
+          "token_endpoint_auth_method":"client_secret_post"
+        }
+      }
+    }
+    
+    Would you like to store the client secret in credstash in us-west-2?y
+    Enter MFA code: 
+    second-opinion:client_secret:S7Zje9nuBfyb has been stored
+2. Store the resulting configuration in the [infosec-internal-data](https://github.com/mozilla/security-private/tree/master/infosec-internal-data) repo in the [dev](https://github.com/mozilla/security-private/tree/master/infosec-internal-data/second-opinion/dev) or [prod](https://github.com/mozilla/security-private/tree/master/infosec-internal-data/second-opinion/prod) directories. This config will be accessed by zappa via [remote_env](https://github.com/Miserlou/Zappa#remote-environment-variables)
+3. Deploy the `config.json` to the `infosec-internal-data` S3 bucket.
+
+
+## Signing hierarchy
+
+second-opinion uses a hierarchy of GPG signatures to ensure the validity of both
+configuration files and authorization data. This hierarchy consists of 3 levels.
+
+### Signing root authority
+
+The root of the signing authority comes from a GPG keypair with the fingerprint
+hard coded into second-opinion. This can be found in the `SIGNING_ROOT_AUTHORITY_FINGERPRINTS`
+constant.
+
+### Signer map
+
+The next step down the hierarchy comes from the `SIGNER_MAP_URL` which is a URL
+pointing to a `json` map of URLs and their associated authorized signer fingerprints.
+This map, in its entirety, is in turn signed by the root authority and verified.
+
+### Config files and authorization data
+
+Finally the bottom of the hierarchy are both config files for second-opinion
+and authorization data for RPs. These data are hosted elsewhere and referenced
+by URL. The data is fetched from the URL, and the signature is verified to be
+valid and signed by an authorized signer in the SIGNER_MAP.
+
 # Deprecated
 
 ## Chalice

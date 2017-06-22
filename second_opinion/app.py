@@ -7,14 +7,10 @@ from oic.utils.sdb import SessionDB
 from oic.utils.authn.authn_context import AuthnBroker
 from oic.utils.authn.user import UserAuthnMethod
 from oic.utils.http_util import Response
-from oic.utils.http_util import get_post
-import json
-from oic.utils.http_util import SeeOther
 from oic.utils.authz import AuthzHandling
 from oic.utils.authn.client import verify_client
 from oic import rndstr  # moved to oic from oic.oauth2
 from oic.utils.userinfo import UserInfo
-
 from oic.oic.provider import AuthorizationEndpoint
 from oic.oic.provider import EndSessionEndpoint
 from oic.oic.provider import RegistrationEndpoint
@@ -27,30 +23,30 @@ import credstash
 import duo_web
 import string
 from six.moves import urllib
-from oic.oauth2 import redirect_authz_error, authz_error
+from six.moves.http_cookies import SimpleCookie
+from oic.oauth2 import redirect_authz_error
 import logging
-from http.cookies import SimpleCookie
+import json
+import os
+from joblib import Memory
+import requests
+import gnupg
+import hashlib
+import StringIO
+import boto3
 
-for mod_name in ['oic']:
-    logging.getLogger(mod_name).setLevel(logging.DEBUG)
-    logging.getLogger(mod_name).addHandler(logging.StreamHandler())
-
-OIDC_QUERY_ARGUMENTS = [
-    'response_type',
-    'client_id',
-    'state',
-    'prompt',
-    'redirect_uri',
-    'nonce',
-    'scope',
-    'code'
-]
+AWS_LAMBDA_TMP_DIR = '/tmp'
+SIGNING_ROOT_AUTHORITY_FINGERPRINTS = [
+    '85914504D0BFA220E93A6D25B40E5BDC92377335']
+SIGNER_MAP_URL = 's3://infosec-internal-data/second-opinion/prod/signer-map.json'
+SIGNER_MAP_SIG_URL = 's3://infosec-internal-data/second-opinion/prod/signer-map.asc'
+memory = Memory(cachedir=AWS_LAMBDA_TMP_DIR)
+gpg = gnupg.GPG(homedir=AWS_LAMBDA_TMP_DIR)
 
 
 class UserInfoWithGroups(UserInfo):
     def filter(self, userinfo, user_info_claims=None):
-        """
-        Return only those claims that are asked for.
+        """Return only those claims that are asked for.
         It's a best effort task; if essential claims are not present
         no error is flagged.
 
@@ -87,18 +83,23 @@ class UserInfoWithGroups(UserInfo):
 
 
 class DuoAuthnMethod(UserAuthnMethod):
-    url_endpoint = "/duo/verify"
-
     def __init__(self, app, **kwargs):
         super(DuoAuthnMethod, self).__init__(None)
         self.app = app
-        self.user_db = {
-            "diana": "krall",
-            "babs": "howes",
-            "upper": "crust"
-        }
 
     def __call__(self, *args, **kwargs):
+        """Build and return a Duo Security login page using the login_hint
+        value passed in the query string.
+
+        Also store the query string arguments in the user's session (client
+        side cookie) so they can be re-read when the user returns after
+        authenticating with Duo Security.
+
+        :param str kwargs['query']: The query string passed in the initial
+        /authorize GET request
+        :return: A Response object containing the web page with the Duo
+        Security iframe
+        """
         login_hint = urllib.parse.parse_qs(kwargs['query'])['login_hint'][0]
 
         sign_function = duo_web.sign_request
@@ -109,91 +110,80 @@ class DuoAuthnMethod(UserAuthnMethod):
             login_hint.decode('utf-8', 'ignore')
         )
         body_template = string.Template(r"""
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Duo Authentication Prompt</title>
-            <meta name='viewport' content='width=device-width, initial-scale=1'>
-            <meta http-equiv="X-UA-Compatible" content="IE=edge">
-            <style>
-              #duo_iframe {
-                width: 100%;
-                min-width: 304px;
-                max-width: 620px;
-                height: 330px;
-                border: none;
-              }
-              body {
-                text-align: center;
-              }
-            </style>
-          </head>
-          <body>
-            <h1>Duo Authentication Prompt</h1>
-            <script src='../static/Duo-Web-v2.js'></script>
-            <iframe id="duo_iframe"
-                    title="Two-Factor Authentication"
-                    frameborder="0"
-                    data-host="$data_host"
-                    data-sig-request="$sig_request"
-                    data-post-action="$data_post_action"
-                    >
-            </iframe>
-          </body>
-        </html>""")
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Duo Authentication Prompt</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <style>
+      #duo_iframe {
+        width: 100%;
+        min-width: 304px;
+        max-width: 620px;
+        height: 330px;
+        border: none;
+      }
+      body {
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Duo Authentication Prompt</h1>
+    <script src='../static/Duo-Web-v2.js'></script>
+    <iframe id="duo_iframe"
+            title="Two-Factor Authentication"
+            frameborder="0"
+            data-host="$data_host"
+            data-sig-request="$sig_request"
+            data-post-action="$data_post_action"
+            >
+    </iframe>
+  </body>
+</html>""")
+
         # Ascii encoding is a workaround for
         # https://github.com/awslabs/chalice/issues/262
         body = body_template.substitute(
             data_host=self.app.config['credentials'][
                 'second-opinion:duo:data-host'],
             sig_request=sig_request,
-            data_post_action=self.url_endpoint
+            data_post_action=self.app.config['OP_DUO_VERIFY_ROUTE']
         ).encode('ascii', 'ignore')
 
         # Save the OIDC query arguments in the Flask session so we can
         # access them after the Duo login and verification completes
         session['state'] = request.args
-        # for argument in request.args:
-        #     if argument in OIDC_QUERY_ARGUMENTS:
-        #         session[argument] = request.args[argument]
-
         return Response(body)
 
     def verify(self, *args, **kwargs):
+        """Verify the signed response (sig_repsonse) that the user POSTs to
+        the OP_DUO_VERIFY_ROUTE by calling Duo Security to verify the
+        signature.
+
+        If the signed response is valid, create a symmetrically encrypted
+        cookie with the user's verified username and redirect the user back to
+        the /authorization route with the original query arguments attached
+        that we temporarily stored in the Flask session. This will cause the
+        user to hit the /authorization endpoint in the same way that they did
+        initially but this time with an encrypted cookie showing that they're
+        authenticated.
+
+        Once the user hits the /authorization endpoint with the encrypted
+        cookie they will get redirected to the RP callback with state and
+        code query arguments.
+
+        request.form['sig_response']
+        session['state']
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
 
         # We don't need to validate client_id here as it will be checked at
         # the token endpoint
-
-        # if 'client_id' not in session:
-        #     return redirect_authz_error(error='invalid_request')
-        #     return (
-        #         "client_id wasn't found in the session which should have "
-        #         "been provided in the /authorize call")
-        # if session['client_id'] not in self.app.config['OP_CLIENT_DB']:
-        #     return (
-        #         "client_id provided in the /authorize call was not found in "
-        #         "our database of registered clients")
-
-        # presence of redirect_uri as a query argument is tested for in
-        # authorization_endpoint auth_init . Since at the moment Duo is not
-        # configured to pass back the inbound query arguments in the
-        # callback I don't think this test will pass.
-
-        # I need to ask kang again what the downsides are to setting the duo
-        #  data-post-action which allows me to pass the query arguments back
-        #  to the OP instead of using the session. The benefit of this is
-        # that pyoidc then deals with this second call to the authorization
-        # endpoint as if it's normal and we simply verify the duo
-        # sig_response and allow or dissallow the user
-
-        # if 'redirect_uri' not in session:
-        #     return authz_error("invalid_request_uri")
-        #
-        # allowed_redirect_uris = self.app.config['OP_CLIENT_DB'][session[
-        #     'client_id']]['redirect_uris']
-        # if (list(urllib.parse.splitquery(session['redirect_uri']))
-        #         not in allowed_redirect_uris):
-        #     return authz_error("invalid_request_uri")
 
         authenticated_username = duo_web.verify_response(
             self.app.config['credentials']['second-opinion:duo:ikey'],
@@ -201,64 +191,31 @@ class DuoAuthnMethod(UserAuthnMethod):
             self.app.config['credentials']['second-opinion:duo:akey'],
             request.form['sig_response']
         )
-        completed = True
 
-        if not completed:
-            # TODO : I don't see a code path that brings us here but I don't
-            #  understand why you'd call val as if it were a method since at
-            #  least in the case of user_pass it's a string of the username
-            return val(environ, start_response), False
-
-        # TODO : I am here ! I need to return a 302 page with state and code
-        #  on success to send the user back to the RP. One Duo verification
-        # failure I need to maybe redirect the user back to Duo?
-        # Either way, the return value here is a flask response object not a
-        #  username as I'd thought from the simple_op example
-
-        # redirect_uri = urllib.parse.urlparse(session['redirect_uri'])
-        # query_pairs = urllib.parse.parse_qsl(redirect_uri.query)
-        # for argument in session:
-        #     if argument in OIDC_QUERY_ARGUMENTS:
-        #         query_pairs.append((argument, session[argument]))
-        # new_uri = urllib.parse.urlunparse(
-        #     redirect_uri[0:4] +
-        #     (urllib.parse.urlencode(query_pairs),) +
-        #     redirect_uri[5:6])
+        # The behaviour seen in other pyoidc UserAuthnMethod classes returns
+        #  both the authenticated username and a boolean `completed` value.
+        # We don't do that here and that may prevent multi-auth from
+        # working. We instead return a Response object (instead of a
+        # username, completed tuple).
 
         if authenticated_username:
-            # Why in simple_op do we redirect to that /authorization
-            # endpoint instead of to the redirect_uri?
-            # And why set a cookie called "auth" to the
-            # authenticated_username if it appears to never be used?
-            #
-            # So I think we have to send the user back to /authorization in
-            # order to generate the 'code' and subsequently redirect them
-            # back to the RP
-            #
-            # By my read the way that the verify method (like this one)
-            # conveys authentication success is by setting a symetrically
-            # encrypted cookie containing the user id (email) and a value
-            # like "auth" or "samlm" or "query" or "casm" or "upm"
-            #
-            # I can't however determine how the /authorization endpoint then
-            #  consumes this cookie to know that auth succeeded
-
             set_cookie, cookie_value = self.create_cookie(
                 authenticated_username, "auth")
             cookie_value += "; path=/"
-
-            # url = "{base_url}?{query_string}".format(
-            #     base_url="/{}".format(AuthorizationEndpoint.etype),
-            #     query_string=urllib.parse.urlencode(session['state']))
             response = redirect(
                 url_for('authorization', **session['state']), 303)
-            # This is to force allowing a relative URL in the Location
-            # header because if we don't we end up redirecting from https to
-            #  http because flask doesn't realize we're behind a reverse
-            # proxy. We should probably fix this systemically
-            # http://flask.pocoo.org/snippets/35/
-            # however it probably doesn't matter in a lambda context
+
+            # autocorrect_location_header is to force allowing a relative
+            # URL in the Location header because if we don't we end up
+            # redirecting from https to http because flask doesn't realize
+            # we're behind a reverse proxy. We should probably fix this
+            # systemically http://flask.pocoo.org/snippets/35/
+            # however it probably doesn't matter when deployed in lambda
+            # and no longer behind a reverse proxy
             response.autocorrect_location_header = False
+
+            # Convert the cookie_value string created by self.create_cookie
+            # into calls to response.set_cookie so Flask can set the cookies
             cookie = SimpleCookie(cookie_value)
             for cookie_name in cookie:
                 response.set_cookie(
@@ -275,14 +232,9 @@ class DuoAuthnMethod(UserAuthnMethod):
                                 'httponly']
                        and len(cookie[cookie_name][k]) > 0})
             return response
-
-            # return SeeOther(url, headers=[(set_cookie, cookie_value)])
-
-
-
-            # return redirect(new_uri, 303)
         else:  # Unsuccessful authentication
-            return redirect_authz_error("access_denied", new_uri)
+            return redirect_authz_error(
+                "access_denied", url_for('authorization'))
 
 
 class PyOIDCOP(object):
@@ -292,25 +244,43 @@ class PyOIDCOP(object):
             self.init_app(app)
 
     def init_app(self, app):
+        """Initialize the Flask app.
+
+        Load configuration settings
+        Create the Authn Broker
+        Add the Duo Security authentication method to the Authn Broker
+        Bind the OP_DUO_VERIFY_ROUTE route to the DuoAuthnMethod
+          verify method for users returning after entering their Duo code
+        Create the OpenID Connect Provider
+        Setup each of the OpenID Connect OP endpoints and route them to the
+          associated URL path
+
+        :param app: The Flask app object
+        :return:
+        """
         self.load_config()
+
+        if self.app.config['DEBUG']:
+            # Set each library's logging level to DEBUG
+            for mod_name in ['oic']:
+                logging.getLogger(mod_name).setLevel(logging.DEBUG)
+                logging.getLogger(mod_name).addHandler(logging.StreamHandler())
 
         app.teardown_appcontext(self.teardown)  # Flask 0.9 or newer
 
         self.authn_broker = AuthnBroker()
-        instance = DuoAuthnMethod(self.app)
-        self.authn_broker.add("duo", instance)
+        duo_auth_instance = DuoAuthnMethod(self.app)
+        self.authn_broker.add("duo", duo_auth_instance)
+
+        # /duo/verify
         self.app.add_url_rule(
-            rule=instance.url_endpoint,
+            rule=self.app.config['OP_DUO_VERIFY_ROUTE'],
             endpoint='verify',
-            view_func=instance.verify,
+            view_func=duo_auth_instance.verify,
             methods=['POST'])
-        provider = self.get_provider()
-        provider.keyjar.import_jwks(
-            self.app.config['OP_JWKS_PRIVATE'], issuer='')
-        provider.jwks_uri = "{}{}".format(
-            provider.baseurl,
-            self.app.config['OP_JWKS_ROUTE']
-        )
+
+        client_id = request.args.get('client_id', None)
+        provider = self.get_provider(self.get_userinfo(client_id))
 
         # /.well-known/jwks.json
         @self.app.route(self.app.config['OP_JWKS_ROUTE'])
@@ -322,14 +292,11 @@ class PyOIDCOP(object):
             "/{}".format(AuthorizationEndpoint.etype),
             methods=['GET', 'POST'])
         def authorization():
-            a = provider.authorization_endpoint(
+            return provider.authorization_endpoint(
                 request=request.values.to_dict(),
                 cookie=SimpleCookie(request.cookies).output(
                     header='', sep='; ')
             )
-
-            # return (a.message, a.status, a.headers)
-            return a
 
         # /token
         @self.app.route(
@@ -393,204 +360,273 @@ class PyOIDCOP(object):
             else:
                 return BadRequest("Incorrect webfinger.")
 
-        # /static
-        # Served automatically from the static directory
-        # http://flask.pocoo.org/docs/0.12/quickstart/#static-files
-
-        @app.route('/user', methods=['GET', 'POST'])
-        def user():
-            if 'login_hint' in request.values:
-                email = request.values['login_hint']
-            else:
-                email = 'user@example.com'
-            if request.method == 'POST':
-                authenticated_username = duo_web.verify_response(
-                    self.app.config['credentials']['second-opinion:duo:ikey'],
-                    self.app.config['credentials']['second-opinion:duo:skey'],
-                    self.app.config['credentials']['second-opinion:duo:akey'],
-                    request.form['sig_response']
-                )
-                if authenticated_username:
-                    return "<h1>Success %s</h1>" % authenticated_username
-            elif request.method == 'GET':
-                sign_function = duo_web.sign_request
-                sig_request = sign_function(
-                    self.app.config['credentials']['second-opinion:duo:ikey'],
-                    self.app.config['credentials']['second-opinion:duo:skey'],
-                    self.app.config['credentials']['second-opinion:duo:akey'],
-                    email
-                )
-                body_template = string.Template(r"""
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Duo Authentication Prompt</title>
-            <meta name='viewport' content='width=device-width, initial-scale=1'>
-            <meta http-equiv="X-UA-Compatible" content="IE=edge">
-            <style>
-              #duo_iframe {
-                width: 100%;
-                min-width: 304px;
-                max-width: 620px;
-                height: 330px;
-                border: none;
-              }
-              body {
-                text-align: center;
-              }
-            </style>
-          </head>
-          <body>
-            <h1>Duo Authentication Prompt</h1>
-            <script src='../static/Duo-Web-v2.js'></script>
-            <iframe id="duo_iframe"
-                    title="Two-Factor Authentication"
-                    frameborder="0"
-                    data-host="$data_host"
-                    data-sig-request="$sig_request"
-                    >
-            </iframe>
-          </body>
-        </html>""")
-                # Ascii encoding is a workaround for
-                # https://github.com/awslabs/chalice/issues/262
-                body = body_template.substitute(
-                    data_host=self.app.config['credentials'][
-                        'second-opinion:duo:data-host'],
-                    sig_request=sig_request
-                ).encode('ascii', 'ignore')
-                return body
+                # /static
+                # Served automatically from the static directory
+                # http://flask.pocoo.org/docs/0.12/quickstart/#static-files
 
     def load_config(self):
-        self.app.config['credentials'] = credstash.getAllSecrets(
-            context={'application': 'second-opinion'},
-            credential='second-opinion:*',
-            region="us-west-2"
+        """Build the configuration by overlaying DEFAULTS with environment
+        variables and with config drawn from the CONFIG_URL page. Add in
+        secrets from credstash. Add in authorization data for the users of
+        each relying party.
+
+        :return:
+        """
+
+        # Establish default configuration values
+        DEFAULTS = {
+            'DEBUG': True,
+            'OP_ISSUER': 'https://second-opinion.security.allizom.org',
+            'OP_JWKS_ROUTE': '/.well-known/jwks.json',
+            'OP_DUO_VERIFY_ROUTE': '/duo/verify',
+            'OP_USERINFO': {},
+            'OP_CLIENT_DB': {}
+        }
+
+        app.config.update(DEFAULTS)
+
+        # Override the defaults with any environment variables
+        for v in [x for x in os.environ if x in DEFAULTS]:
+            self.app.config[v] = os.environ.get(v)
+
+        # Fetch the signer map
+        self.app.config['SIGNER_MAP'] = self.fetch_and_verify(
+            SIGNER_MAP_URL,
+            SIGNER_MAP_SIG_URL,
+            SIGNING_ROOT_AUTHORITY_FINGERPRINTS,
+            {}
         )
 
-        self.app.logger.info(
-            credstash.getSecret('second-opinion:duo:data-host',
-                                region="us-west-2",
-                                context={'application': 'second-opinion'}))
+        # Fetch the hosted config
+        if 'CONFIG_URL' in os.environ:
+            fetched_config = self.fetch_and_verify(
+                os.environ.get('CONFIG_URL'),
+                os.environ.get('CONFIG_SIG_URL'),
+                return_on_error={}
+            )
+            self.app.config.update(fetched_config)
 
-        # self.app.config.setdefault('OP_BASE_URL',
-        #                            'https://op.example.com')
-        # self.app.config.setdefault('OP_PORT', 443)
-        # self.app.config.setdefault(
-        #     'OP_ISSUER',
-        #     self.app.config['OP_BASE_URL'].rstrip("/") + ':' +
-        #     str(self.app.config['OP_PORT']))
-        self.app.config.setdefault(
-            'DEBUG',
-            True)
-        self.app.config[
-            'SECRET_KEY'] = 'SECRET KEY VALUE GETS OVERRIDDEN FROM HERE'
-        self.app.config.setdefault(
-            'OP_ISSUER',
-            'https://op.example.com')
-        self.app.config.setdefault(
-            'OP_CLIENT_DB',
-            {
-                'aaaaaaaaaaaa': {
-                    'client_secret': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                    'redirect_uris': [
-                        ['https://rp.example.com/second-opinion/redirect_uri',
-                         None]],
-                    'client_salt': 'aaaaaaaa',
-                    'client_id': 'aaaaaaaaaaaa',
-                    'token_endpoint_auth_method': 'client_secret_post'
-                }
-            }
-        )
-        self.app.config.setdefault(
-            'OP_KEY_CONFIG',
-            [
-                {'use': ['enc', 'sig'],
-                 'type': 'RSA',
-                 'key': 'keys/key.pem'},
-                {'use': ['sig'],
-                 'type': 'EC',
-                 'crv': 'P-256'},
-                {'use': ['enc'],
-                 'type': 'EC',
-                 'crv': 'P-256'}]
-        )
-        self.app.config.setdefault(
-            'OP_JWKS_ROUTE',
-            '/.well-known/jwks.json'
-        )
+        # Fetch secrets
+        try:
+            self.app.config['credentials'] = credstash.getAllSecrets(
+                context={'application': 'second-opinion'},
+                credential='second-opinion:*',
+                region="us-west-2"
+            )
+        except:
+            self.app.logger.error("Unable to load credentials with credstash")
 
-        # TODO : Establish way to pull config from credstash
-        self.app.config.setdefault(
-            'OP_JWKS_PRIVATE', 'KEY DATA STRUCTURE WILL GO HERE'
-        )
+        # Override the default SECRET_KEY
+        self.app.config['SECRET_KEY'] = self.app.config['credentials'][
+            'second-opinion:secret-key']
 
-        self.app.config.setdefault(
-            'OP_USERINFO',
-            {
-                "user@example.com": {
-                    "sub": "ad|second-opinion-dev|user@example.com",
-                    "name": "Diana Krall",
-                    "given_name": "Diana",
-                    "family_name": "Krall",
-                    "nickname": "Dina",
-                    "email": "user@example.com",
-                    "email_verified": True,
-                    "phone_number": "+46 90 7865000",
-                    "address": {
-                        "street_address": "Ume Universitet",
-                        "locality": "Ume",
-                        "postal_code": "SE-90187",
-                        "country": "Sweden"
-                    },
-                    "groups": [
-                        "foo",
-                        "bar",
-                    ]
-                },
-                "babs": {
-                    "sub": "babs0001",
-                    "name": "Barbara J Jensen",
-                    "given_name": "Barbara",
-                    "family_name": "Jensen",
-                    "nickname": "babs",
-                    "email": "babs@example.com",
-                    "email_verified": True,
-                    "address": {
-                        "street_address": "100 Universal City Plaza",
-                        "locality": "Hollywood",
-                        "region": "CA",
-                        "postal_code": "91608",
-                        "country": "USA"
-                    }
-                },
-                "upper": {
-                    "sub": "uppe0001",
-                    "name": "Upper Crust",
-                    "given_name": "Upper",
-                    "family_name": "Crust",
-                    "email": "uc@example.com",
-                    "email_verified": True
-                }
-            }
-        )
+        # Fetch authorization data
+        for client_id, authorization_urls in self.app.config.get(
+                'OP_AUTHORIZATION_URLS', {}).iteritems():
+            authorization_data = self.fetch_and_verify(
+                authorization_urls['authorization_data_url'],
+                authorization_urls['authorization_data_sig_url'],
+                return_on_error={}
+            )
+
+            self.app.config['OP_AUTHORIZATION_DATA'][
+                client_id] = authorization_data
+            self.app.config['OP_USER_INFO'][client_id] =
 
     def teardown(self, exception):
         pass  # teardown actions
 
-    def get_provider(self):
+    def get_provider(self, userinfo):
+        """Create an OpenID Connect provider using a given user info
+        dictionary passed in.
+
+        :param dict userinfo: The user information dictionary associated
+        with the client_id of the current request
+        :return: An oic provider object
+        """
         provider = Provider(
             name=self.app.config['OP_ISSUER'],
             sdb=SessionDB(self.app.config['OP_ISSUER']),
             cdb=self.app.config['OP_CLIENT_DB'],
             authn_broker=self.authn_broker,
-            userinfo=UserInfoWithGroups(self.app.config['OP_USERINFO']),
+            userinfo=UserInfoWithGroups(userinfo),
             authz=AuthzHandling(),
             client_authn=verify_client,
             symkey=None)
         provider.baseurl = self.app.config['OP_ISSUER']
         provider.symkey = rndstr(16)
+        provider.keyjar.import_jwks(
+            json.loads(
+                self.app.config['credentials']['second-opinion:opkeys']),
+            issuer='')
+        provider.jwks_uri = "{}{}".format(
+            provider.baseurl,
+            self.app.config['OP_JWKS_ROUTE']
+        )
         return provider
+
+    def get_url_or_s3_object(self, url):
+        """Fetch the payload of a url from either the web or s3
+
+        :param str url:
+        :return: tuple of (success, payload)
+        """
+        if url.startswith('s3://'):
+            client = boto3.client('s3')
+            bucket_name = url[5:].split('/')[0]
+            key_name = '/'.join(url[5:].split('/')[1:])
+            try:
+                response = client.get_object(
+                    Bucket=bucket_name,
+                    Key=key_name
+                )
+            except Exception as e:
+                self.app.logger.error(
+                    "Unable to fetch %s : %s" % (url, e))
+                return False, ''
+            else:
+                return True, response['Body'].read()
+        else:
+            response = requests.get(url)
+            if not response.ok:
+                self.app.logger.error(
+                    "Unable to fetch %s : %s" % (url, response.reason))
+            return response.ok, response.content
+
+    @memory.cache
+    def fetch_and_verify(
+            self, page_url, signature_url,
+            authorized_signers=None, return_on_error=False):
+        """Fetch content from page_url and a detached signature from
+        signature_url, gpg verify that the detached signature is a valid for
+        the page and that the signer is in the authorized_signers list of
+        fingerprints. Return the page or False.
+
+        :param str page_url: URL of the page to fetch
+        :param str signature_url: URL of the detached signature for page_url
+        :param list authorized_signers: List of GPG fingerprints that are
+        authorized to sign the page or None to indicate that the
+        authorized signers should be obtained from the signer map,
+        self.app.config['SIGNER_MAP']
+        :param return_on_error: value to return on error
+        :return: payload for page_url or the content of return_on_error if
+        there is a problem with fetching or verification
+        """
+        page_success, page = self.get_url_or_s3_object(page_url)
+        signature_success, signature = self.get_url_or_s3_object(signature_url)
+        if not (page_success and signature_success):
+            return return_on_error
+        if authorized_signers is None:
+            matching_authorized_signer_lists = [
+                self.app.config['SIGNER_MAP'][url_prefix] for url_prefix
+                in self.app.config['SIGNER_MAP']
+                if page_url.startswith(url_prefix)]
+            if len(matching_authorized_signer_lists) == 0:
+                raise Exception(
+                    "No matching allowed signers for %s found in signer map" %
+                    page_url)
+            elif len(matching_authorized_signer_lists) > 0:
+                raise Exception(
+                    "Multiple matching allowed signer lists found for %s : "
+                    "%s" % (page_url, matching_authorized_signer_lists))
+            [authorized_signers] = matching_authorized_signer_lists
+
+        signature_filename = os.path.join(
+            AWS_LAMBDA_TMP_DIR,
+            hashlib.sha256(page).hexdigest()
+        )
+        with open(signature_filename) as signature_file:
+            signature_file.write(signature)
+        verification_result = gpg.verify_file(
+            file=StringIO.StringIO(page),
+            sig_file=signature_file
+        )
+        if not verification_result.valid:
+            self.app.logger.error(
+                "Unable to verify %s with detached signature %s : %s" % (
+                    page_url, signature_url, verification_result.status
+                ))
+            return return_on_error
+        if verification_result.fingerprint not in authorized_signers:
+            self.app.logger.error(
+                "Valid signature by %s of %s is not an authorized signer" % (
+                    verification_result.fingerprint, page_url
+                ))
+            return return_on_error
+        try:
+            result = json.loads(page)
+        except ValueError:
+            return return_on_error
+        else:
+            return result
+
+    def get_userinfo(self, client_id=None):
+        """Produce an OpenID Connect userinfo data structure for a given
+        client_id using that RP's OP_AUTHORIZATION_DATA. The userinfo data
+        structure looks like
+
+        {
+          "jdoe@example.com": {
+            "sub": "",
+            "email": "jdoe@example.com",
+            "groups": [
+              "finance"
+            ]
+          },
+          "user@example.com": {
+            "sub": "",
+            "email": "user@example.com",
+            "groups": [
+              "finance"
+            ]
+          }
+        }
+
+        :param str client_id: The client ID of the RP
+        :return: Userinfo dictionary
+        """
+        if client_id is None:
+            return {}
+
+        authorization_data = self.app.config['OP_AUTHORIZATION_DATA'].get(
+            client_id, {})
+        groups = authorization_data.get('groups', {})
+
+        # Create set of flattened list of lists of users in all groups
+        users = set(
+            [item for sublist in
+             [groups[x] for x in groups] for item in
+             sublist])
+        userinfo = {}
+        for user in users:
+            userinfo[user] = {
+                'sub': 'ad|second-opinion-dev|%s' % user,
+                'email': user,
+                'groups': self.get_groups_for_user(client_id, user)
+            }
+        return userinfo
+
+    def get_groups_for_user(self, client_id, user):
+        """Given a user return the groups that user is a member of. This
+        assumes a structure of OP_AUTHORIZATION_DATA that looks like
+
+        {
+          "groups": {
+            "finance": [
+              "jdoe@example.com",
+              "user@exapmle.net"
+            ]
+          }
+        }
+
+        :param str client_id: The client ID of the RP
+        :param str user: The username of the user
+        :return: A list of group names
+        """
+        authorization_data = self.app.config['OP_AUTHORIZATION_DATA'].get(
+            client_id, {})
+        groups = authorization_data.get('groups', {})
+        return [x for x in groups if user in groups[x]]
 
 
 app = Flask(__name__)

@@ -8,6 +8,29 @@
         "lambda_description": "Second Opinion",
         "project_name": "second-opinion",
         // "debug": true,
-        "apigateway_description": "Second Opinion"
+        "apigateway_description": "Second Opinion",
+        "domain": "second-opinion.security.allizom.org",
+        "lets_encrypt_key": "/path/to/second-opinion-letsencrypt-account.key",
+        "environment_variables": {
+            "CONFIG_URL": "s3://infosec-internal-data/second-opinion/dev/config.json",
+            "CONFIG_SIG_URL": "s3://infosec-internal-data/second-opinion/dev/config.asc",
+        }
+    },
+    "prod": {
+        "app_function": "app.app",
+        "s3_bucket": "infosec-dev-zappa",
+        "manage_roles": false, // Disable Zappa client managing roles.
+        "role_name": "second_opinion", // Name of your Zappa execution role. Default ZappaExecutionRole.
+        "keep_warm": false,
+        "lambda_description": "Second Opinion",
+        "project_name": "second-opinion",
+        // "debug": true,
+        "apigateway_description": "Second Opinion",
+        "domain": "second-opinion.security.mozilla.org",
+        "lets_encrypt_key": "/path/to/second-opinion-letsencrypt-account.key",
+        "environment_variables": {
+            "CONFIG_URL": "s3://infosec-internal-data/second-opinion/prod/config.json",
+            "CONFIG_SIG_URL": "s3://infosec-internal-data/second-opinion/prod/config.asc",
+        }
     }
 }
