@@ -6,37 +6,41 @@ This project is pre-alpha currently.
 
 # Setup
 
-## To put credentials into credstash
+## Create IAM Role for Lambda Function
 
-Assuming you have your Duo secrets stored in 4 files :
+Deploy the `second_opinion_lambda_execution_role.json` CloudFormation template
+
+## Push Credentials into Credstash
+
+Assuming you have your Duo secrets stored in 3 files :
 
     region="us-west-2"
     credstash_key_id="`aws --region $region kms list-aliases --query "Aliases[?AliasName=='alias/credstash'].TargetKeyId | [0]" --output text`"
     role_arn="`aws iam get-role --role-name second_opinion --query Role.Arn --output text`"
     constraints="EncryptionContextEquals={application=second-opinion}"
+    akey="`python -c "import os, hashlib; print hashlib.sha1(os.urandom(32)).hexdigest()"`"
     
     # Grant the second-opinion IAM role permissions to decrypt
     aws kms create-grant --key-id $credstash_key_id --grantee-principal $role_arn --operations "Decrypt" --constraints $constraints --name second-opinion
 
     # Add a credential to the store
-    cat akey.txt | tr -d '\n' | credstash --region $region put --autoversion second-opinion:duo:akey - application=second-opinion
+    echo "$akey" | tr -d '\n' | credstash --region $region put --autoversion second-opinion:duo:akey - application=second-opinion
     cat ikey.txt | tr -d '\n' | credstash --region $region put --autoversion second-opinion:duo:ikey - application=second-opinion
     cat skey.txt | tr -d '\n' | credstash --region $region put --autoversion second-opinion:duo:skey - application=second-opinion
     cat data-host.txt | tr -d '\n' | credstash --region $region put --autoversion second-opinion:duo:data-host - application=second-opinion
 
 Note : Since KMS grants are only eventually consistent, second-opinion won't immediately have access to these credstash credentials after granting it access to them
 
-## To get certs
+# In my deployment to infosec-isolated, I'm here. I'm testing ACM in infosec-dev
 
+## Generate an ACM Certificate
 
-    rp_name=rp.example.com
-    op_name=op.example.com
-    email=user@example.com
-    
-    virtualenv venv-getcert
-    mkdir getcert
-    venv-getcert/bin/pip install certbot certbot-route53 git+https://github.com/gene1wood/botocore.git@persistent-credential-cache-with-serialization
-    venv-getcert/bin/certbot certonly -n --agree-tos --email $email -a certbot-route53:auth -d $rp_name -d $op_name --config-dir getcert/ --work-dir getcert/ --logs-dir getcert/
+Instead of using Lets Encrypt, as [the certificate renewal process requires downtime](https://github.com/Miserlou/Zappa/issues/1016), request issuance of an ACM Certificate in `us-east-1`
+
+Once the certificate is issued, determine the ARN of the cert and configure it in `zappa_settings.json`
+
+## x
+  
 
 ## To create OIDC OP Keys
 
@@ -78,16 +82,20 @@ Create DNS entries for the RP and OP in route53
 
       venv-zappa2/bin/pip install -r ../second_opinion/requirements.txt
 
-* Certify
-
-      ../.sandbox/venv-zappa2/bin/zappa certify
-    
 * Deploy?
 
       . ../.sandbox/venv-zapp2/bin/activate
       zappa deploy dev
+      zappa tail dev
 
-* Create route53 CNAME to workaround https://github.com/Miserlou/Zappa/issues/762
+* Certify
+
+      ../.sandbox/venv-zappa2/bin/zappa certify
+
+* Create route53 CNAME
+ * When we were using Lets Encrypt this was to workaround https://github.com/Miserlou/Zappa/issues/762
+ * Now using ACM the Certify should fix things
+
 
 # Usage
 
@@ -138,7 +146,12 @@ Create DNS entries for the RP and OP in route53
 ## Signing hierarchy
 
 second-opinion uses a hierarchy of GPG signatures to ensure the validity of both
-configuration files and authorization data. This hierarchy consists of 3 levels.
+configuration files and authorization data. This hierarchy consists of 4 levels.
+
+The actors in this hierarchy are
+* signing root authority : This is a single GPG keypair stored in a safe
+* root signers : This is a set of signers for each functional area of Mozilla that wants to use second opinion. This list should only change when an entirely new functional area of Mozilla begins using second opinion which should be infrequent.
+* client signers : These are the signers that a given Mozilla functional area administrator wants to authorize to manage a one of their clients authorization data. As each functional area's list of client signers is managed entirely within that functional area, the list of client signers could change frequently or infrequently depending on the internal practices of the functional area admins
 
 ### Signing root authority
 
@@ -146,18 +159,96 @@ The root of the signing authority comes from a GPG keypair with the fingerprint
 hard coded into second-opinion. This can be found in the `SIGNING_ROOT_AUTHORITY_FINGERPRINTS`
 constant.
 
-### Signer map
+#### Example signing root authority
+
+    {"s3://example-bucket/signer-map.json" : ["12345678"]}
+
+### Root signer map
 
 The next step down the hierarchy comes from the `SIGNER_MAP_URL` which is a URL
 pointing to a `json` map of URLs and their associated authorized signer fingerprints.
 This map, in its entirety, is in turn signed by the root authority and verified.
+This map is used to enumerate the authorized signers of both the config files and the client signer maps
 
-### Config files and authorization data
+#### Example root signer map
 
-Finally the bottom of the hierarchy are both config files for second-opinion
-and authorization data for RPs. These data are hosted elsewhere and referenced
-by URL. The data is fetched from the URL, and the signature is verified to be
-valid and signed by an authorized signer in the SIGNER_MAP.
+`s3://example-bucket/signer-map.json` signed by `12345678`
+
+    {"signer_map": {
+        "s3://second-opinion-bucket/configs/": ["90ABCDEF"],
+        "s3://foo-org-bucket/": ["01234567"],
+        "s3://bar-org-bucket/so/": ["890ABCDE"],
+    }}
+
+### Config files and client signer maps
+
+The third level down contains config files and lists of signers that can sign authorization data.
+
+#### Config files
+
+The second opinion config files are signed by a signer authorized in the root signer map. The files contain the client IDs and each client's authorization data url and client signer map url (note this is a signer map specific to a given client)
+
+##### Example config file
+
+`s3://second-opinion-bucket/configs/config.json` signed by `90ABCDEF`
+
+    {
+      "OP_AUTHORIZATION_URLS": {
+        "abCDefGHijKL": {
+          "signer_map_url" : "s3://foo-org-bucket/signer-map.json",
+          "signer_map_sig_url" : "s3://foo-org-bucket/signer-map.json.sig",
+          "authorization_data_url" : "s3://foo-org-bucket/baz-client/authorization.json",
+          "authorization_data_sig_url" : "s3://foo-org-bucket/baz-client/authorization.json.sig"
+        },
+        "mnOPqrSTuvWX": {
+          "signer_map_url" : "https://bar.example.com/so/signers.json",
+          "signer_map_sig_url" : "https://bar.example.com/so/signers.json.sig",
+          "authorization_data_url" : "https://bar.example.com/qux-client/auth.json",
+          "authorization_data_sig_url" : "https://bar.example.com/qux-client/auth.json.sig"
+        }
+      }
+    }
+
+#### Client signer maps
+
+Each functional area hosts it's own signer map. This allows for self service addition and removal of authorized signers of the authorization data for clients. 
+
+##### Example client signer map
+`s3://foo-org-bucket/signer-map.json` signed by `01234567`
+
+    {
+      "signer_map": {
+        "s3://foo-org-bucket/baz-client/": [
+          "F0123456",
+          "7890ABCD"
+        ]
+      }
+    }
+
+#### Authorization data
+
+Each client can have a distinct authorization data file, or clients can share an authorization data file. This authorization data should match the authorization data stored in the primary authentication provider. The signers detailed in the client signer map can sign the authorization data file.
+
+##### Example authorization data
+`s3://foo-org-bucket/baz-client/authorization.json` signed by `F0123456`
+
+    {
+      "groups": {
+        "team_finance": [
+          "alice@example.com",
+          "john@example.com",
+          "jane@example.com"
+        ]
+      }
+    }
+
+
+## How to sign files
+
+    gpg --default-key 0x85914504D0BFA220E93A6D25B40E5BDC92377335 --output signer-map.json.sig --detach-sig signer-map.json
+    gpg --default-key 0x85D77543B3D624B63CEA9E6DBC17301B491B3F21 --output config.json.sig --detach-sig config.json
+
+
 
 # Deprecated
 
@@ -194,3 +285,15 @@ rsync -Lav ec2-user@$ec2host:/usr/lib64/libcrypto.so vendor/libcrypto.so.1.0.0
 ### Challenges
 
 Intermittently encountering a scenario where boto3 throws a ClientError which chalice passes to click which in turn tries to encode it as an ascii string which fails because of unicode characters in the boto3 exception payload. This may relate to this [bug](http://bugs.python.org/issue2517).
+
+## To get manual certs for testing
+
+
+    rp_name=rp.example.com
+    op_name=op.example.com
+    email=user@example.com
+    
+    virtualenv venv-getcert
+    mkdir getcert
+    venv-getcert/bin/pip install certbot certbot-route53 git+https://github.com/gene1wood/botocore.git@persistent-credential-cache-with-serialization
+    venv-getcert/bin/certbot certonly -n --agree-tos --email $email -a certbot-route53:auth -d $rp_name -d $op_name --config-dir getcert/ --work-dir getcert/ --logs-dir getcert/
