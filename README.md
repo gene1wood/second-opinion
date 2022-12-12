@@ -1,8 +1,8 @@
-Second Opinion is an OpenID Connect OpenID Provider (OP) which uses Duo Security for authentication and an out-of-band authorization provider for authorization. It seeks to provide a second opinion to a relying party (RP) after their user has authenticated with the primary OP and the RP has received back authorization claims from the primary OP. 
+Second Opinion was an OpenID Connect OpenID Provider (OP) which used Duo Security for authentication and an out-of-band authorization provider for authorization. It sought to provide a second opinion to a relying party (RP) after their user has authenticated with the primary OP and the RP has received back authorization claims from the primary OP. 
 
-# Status
+# Status : Deprecated
 
-This project is pre-alpha currently.
+This project never made it. The design idea is sound but couldn't push it past the finish line and get adoption.
 
 # Setup
 
