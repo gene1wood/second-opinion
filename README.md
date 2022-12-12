@@ -36,7 +36,7 @@ We could apply this same type of solution to the question of authorization for t
 
 In order to reduce the number of calls that the relying party needs to make during authentication and authorization and to simplify the process of getting the second opinion, we could create an out-of-band authentication and authorization provider. This OIDC provider would send the user on to Duo to authenticate with their multi-factor authentication device, then the out-of-band provider would fetch the authorization (group membership) information from the second opinion group datastore and include it as claims in the OIDC response to the relying party.
 
-[![Second Opinion Model of Authentication and Authorization](assets/Second Opinion Model of Authentication and Authorization.png)](assets/Second Opinion Model of Authentication and Authorization.pdf)
+[![Second Opinion Model of Authentication and Authorization](assets/Second%20Opinion%20Model%20of%20Authentication%20and%20Authorization.png)](assets/Second%20Opinion%20Model%20of%20Authentication%20and%20Authorization.pdf)
 
 The relying party would then take these 4 pieces of information to make it's decision whether or not to grant the user access
 
