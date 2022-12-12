@@ -10,10 +10,10 @@
         // "debug": true,
         "apigateway_description": "Second Opinion",
         "domain": "second-opinion.security.allizom.org",
-        "lets_encrypt_key": "/path/to/second-opinion-letsencrypt-account.key",
+        "certificate_arn": "arn:aws:acm:us-east-1:656532927350:certificate/f2351003-d318-40cc-9c6f-a7aa062c6986",
         "environment_variables": {
             "CONFIG_URL": "s3://infosec-internal-data/second-opinion/dev/config.json",
-            "CONFIG_SIG_URL": "s3://infosec-internal-data/second-opinion/dev/config.asc",
+            "CONFIG_SIG_URL": "s3://infosec-internal-data/second-opinion/dev/config.json.sig"
         }
     },
     "prod": {
@@ -27,10 +27,10 @@
         // "debug": true,
         "apigateway_description": "Second Opinion",
         "domain": "second-opinion.security.mozilla.org",
-        "lets_encrypt_key": "/path/to/second-opinion-letsencrypt-account.key",
+        "certificate_arn": "",
         "environment_variables": {
             "CONFIG_URL": "s3://infosec-internal-data/second-opinion/prod/config.json",
-            "CONFIG_SIG_URL": "s3://infosec-internal-data/second-opinion/prod/config.asc",
+            "CONFIG_SIG_URL": "s3://infosec-internal-data/second-opinion/prod/config.json.sig"
         }
     }
 }

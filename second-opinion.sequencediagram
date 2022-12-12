@@ -1,0 +1,78 @@
+# This file can be used with http://sequencediagram.org/
+# And rendered to an image file
+
+title Authentication Sequence with OpenID Connect and Second Opinion
+
+participant "User's Browser (User-Agent)" as UserAgent
+participant "Website (Relying Party)" as RP
+participant "Second Opinion OIDC Provider (OP)" as OP
+participant "Duo Security" as Duo
+
+
+RP->OP: GET https:\/\/op.example.net/.well-known/openid-configuration
+OP->RP: JSON meta-data document
+
+note left of OP:JSON meta-data document:\n{"token_endpoint": "https:\/\/op.example.net/oauth/token", \n"authorization_endpoint":"https:\/\/op.example.net/authorize?...",\n[...]}
+
+RP->UserAgent: 302 Redirect to https:\/\/op.example.net/authorize?[...]
+
+note left of RP:GET /authorize parameters:\nstate=xxx (CSRF protection)\nnonce=xxx (server-side replay protection)\nscope=openid email profile\nredirect_uri=https:\/\/rp.example.net/callback (OP will redirect here)\nresponse_type=code\nclient_id=xxx (RP identifier)\nlogin_hint=xxx (email address)
+
+
+UserAgent->OP: GET https:\/\/op.example.net/authorize?[...]
+OP->UserAgent: Show login page with Duo IFrame
+UserAgent->Duo: GET https:\/\/api-4b043da5.duosecurity.com/frame/web/v1/auth?[...]
+
+note right of UserAgent:GET /frame/web/v1/auth parameters:\ntx=xxx (HMAC-SHA1 of login_hint and other values)
+
+Duo->UserAgent: Show IFrame
+UserAgent->Duo: POST https:\/\/api-4b043da5.duosecurity.com/frame/prompt?[...]
+
+note right of UserAgent:POST /frame/prompt parameters:\npasscode=xxx (OTP Code)
+
+Duo->UserAgent: Return signed response
+
+note left of Duo:JSON Document:\n{"response": {\n  "cookie": xxx,\n  [...]\n}}
+
+UserAgent->OP: POST https:\/\/op.example.net/authorize?[...]
+
+note right of UserAgent:POST /authorize parameters:\nsig_response=xxx (Signed response from "cookie")
+
+OP->Duo: GET verify_response(sig_response)
+Duo->OP: authenticated_username
+OP->UserAgent: 302 Redirect to https:\/\/rp.example.net/callback?[...] (redirect_uri)
+
+note left of RP:GET /callback parameters:\nstate=xxx\ncode=xxx
+
+UserAgent->RP: GET https:\/\/rp.example.net/callback?[...]
+RP->OP: POST https:\/\/op.example.net/oauth/token
+
+note right of RP:POST /oauth/token parameters:\nclient_id=xxx\nclient_secret=xxx (secret identifying the RP to the OP)\ngrant_type=authorization_code\ncode=xxx\nstate=xxx
+
+
+OP->RP: JSON {"base64(id_token)", "access_token", ...}
+
+note right of RP:JSON Document:\n{\n\n  "id_token": ADNqVMtqKeYp5w==...,\n  "access_token": xxx,\n  "email": "test@rp.example.net,\n  "attribute1": ...,\n  "attribute2": ...,\n   [...]\n}
+
+RP->RP: Verify id_token signature is valid, signed by OP
+
+
+RP->UserAgent: 302 Redirect https:\/\/rp.example.net/
+note over UserAgent: User is authenticated to https:\/\/rp.example.net
+UserAgent->RP: GET https:\/\/rp.example.net/
+RP->UserAgent: rp.example.net's page is displayed
+
+== 15 minutes later... (session require refresh) ==
+
+
+
+UserAgent->RP: GET https:\/\/rp.example.net/
+RP->UserAgent: 302 Redirect to https:\/\/op.example.net/authorize?**prompt=none**[...]
+
+UserAgent->OP: GET https:\/\/op.example.net/authorize?**prompt=none**[...]
+OP->IdP: silently re-authenticate user
+IdP->OP: return new/current user attributes
+OP->UserAgent: 302 Redirect to https:\/\/rp.example.net/callback?[...] (redirect_uri)
+
+note over UserAgent: User session, expiration and profile attributes are refreshed
+RP->UserAgent: rp.example.net's page is displayed

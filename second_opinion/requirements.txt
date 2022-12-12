@@ -4,21 +4,31 @@ credstash
 boto3
 flask
 joblib
+
+# Note we're using gnupg not python-gnupg
+#  https://github.com/isislovecruft/python-gnupg
+#  https://pythonhosted.org/gnupg/
+#  https://pypi.python.org/pypi/gnupg
+# gnupg was forked from python-gnupg@0.3.2 though python-gnupg has continued to be developed
+# https://pythonhosted.org/gnupg/gnupg.html#about-this-fork
 gnupg
 
-# Pulling from master to get the fix to this bug ( https://github.com/OpenIDC/pyoidc/pull/317 ) which is not present in v0.10.0 in pip
-git+https://github.com/OpenIDC/pyoidc.git
+# We have to pull from before https://github.com/OpenIDC/pyoidc/commit/b9279ae488500fb669e9a46324adee21040692f5
+# As this changes the aes.py tools and I'm getting an `iv` mismatch between when the cookies is encrypted and decrypted
+#
+# And we have to pull from after https://github.com/OpenIDC/pyoidc/commit/b0888c5acb7b05ff6eb31bc2ba91154745b97fd4
+# In order to get this bufix https://github.com/OpenIDC/pyoidc/pull/317
+#git+https://github.com/OpenIDC/pyoidc.git@300adc8cdf1670f6c41dd28394958162ab5a213a
+git+https://github.com/OpenIDC/pyoidc.git@f2209472b44f5a812725b98c3835e0b22665010d
+# oic == 0.11.0.0
 
-# The cryptography lambda package doesn't work https://github.com/Miserlou/lambda-packages/issues/41#issuecomment-304079770
-# So to workaround while we wait for this PR to be merged ( https://github.com/Miserlou/lambda-packages/pull/40 )
+# The cryptography lambda package doesn't work before 0.15.1
+# https://github.com/Miserlou/lambda-packages/issues/41#issuecomment-304079770
 # This must precede the installation of zappa in requirements.txt
-git+https://github.com/gene1wood/lambda-packages.git@update-cryptography-to-1.8.1
+lambda-packages >= 0.15.1
 
-# To workaround https://github.com/Miserlou/Zappa/issues/818 we need at least commit 0052d72bca7db298e28a2db46bfb3c3f09391a6b
-# But we can't go back that far as then it breaks the new python 3 zappa stuff so we'll try master?
-# And because Zappa requirements.txt fixes all package version numbers we need to use a working copy that requests lambda-packages 0.15.1
-/home/gene/code/github.com/gene1wood/Zappa/
-# git+https://github.com/Miserlou/Zappa.git
+# To workaround https://github.com/Miserlou/Zappa/issues/818 we need at least 0.41.2
+Zappa >= 0.41.2
 
 # This PR hasn't yet been merged and so the custom domain name doesn't work
 # https://github.com/Miserlou/Zappa/issues/762
@@ -27,4 +37,7 @@ git+https://github.com/gene1wood/lambda-packages.git@update-cryptography-to-1.8.
 # To workaround https://github.com/boto/botocore/issues/1148
 # And we have to run against botocore 1.5.40 because Doppins PRs aren't merging
 # https://github.com/Miserlou/Zappa/pull/796
-git+https://github.com/gene1wood/botocore.git@temp-credential-cache-on-1.5.40
+
+# We'll use the stock botocore for the moment without credential caching
+# for simplicity. Let's see if it works
+#git+https://github.com/gene1wood/botocore.git@temp-credential-cache-on-1.5.40
