@@ -4,6 +4,73 @@ Second Opinion was an OpenID Connect OpenID Provider (OP) which used Duo Securit
 
 This project never made it. The design idea is sound but couldn't push it past the finish line and get adoption.
 
+# Design
+
+## Summary & Scope
+
+This document describes a model of authentication and authorization that would improve the security of a relying party or website through the use of a second opinion regarding a users authentication and authorization. This model would be usable by any relying party that needs high security.
+
+## Second Opinion Model of Authentication and Authorization
+
+### Current Status
+
+This was a project from 2017 which never made it off the ground and is now deprecated. The code is now archived.
+
+### The Problem
+
+When a single serial chain of systems is used to authenticate or authorize a user to a resource, a security breach of any system in that chain could enable an attacker to gain unauthorized access to that resource. For example when a website depends on Auth0 to authorize a user, and Auth0 depends on an LDAP server to provide the user's group membership information, and the LDAP server gets that group membership data from the mozillians.org website, a security breach of any of those systems could result in unauthorized access. For example, an attacker could compromise mozillians.org and add their user account into a group like `firefox-accounts-administrative-access`, elevating their privileges. This type of problem potentially exists both for authentication and authorization.
+
+### The Second Opinion Model Solution
+
+#### What we do currently
+
+The way that we currently mitigate this risk, specifically for relying parties that handle data classified at a high level of sensitivity, is that the relying party queries two distinct unrelated systems to verify that both systems agree that a user is authenticated. These two distinct systems are currently Okta/Auth0 for the username and password and Duo for the multi factor authentication code. For these high security relying parties, the call to Duo for the multi factor authentication challenge is done by the relying party, not by Okta/Auth0. The result of this is that a security breach of any component in the Okta/Auth0, LDAP chain could result in a fraudulent response to the relying party that an attacker is authenticated. It, however, would not result in the second opinion from Duo indicating that the attacker is authenticated.
+
+This second opinion check is only done for authentication, not authorization.
+
+#### What we could do better
+
+We could apply this same type of solution to the question of authorization for these high security relying parties. Currently relying parties get only one opinion about user group membership which comes from the Okta/Auth0, LDAP chain. One way to do this would be to create a new, simple, system that stored group membership information for a subset of groups which we'd decided were "high security" separately from the Okta/Auth0 LDAP chain. These "high security" groups would be ones which were used by relying parties to grant significant administrative rights to users in their systems.
+
+### Proposed Implementation
+
+In order to reduce the number of calls that the relying party needs to make during authentication and authorization and to simplify the process of getting the second opinion, we could create an out-of-band authentication and authorization provider. This OIDC provider would send the user on to Duo to authenticate with their multi-factor authentication device, then the out-of-band provider would fetch the authorization (group membership) information from the second opinion group datastore and include it as claims in the OIDC response to the relying party.
+
+[![Second Opinion Model of Authentication and Authorization](assets/Second Opinion Model of Authentication and Authorization.png)](assets/Second Opinion Model of Authentication and Authorization.pdf)
+
+The relying party would then take these 4 pieces of information to make it's decision whether or not to grant the user access
+
+* Okta/OAuth's assertion that the user is authenticated
+* Okta/OAuth's claims about group membership
+* Out-of-band provider's assertion that the user is authenticated to Duo
+* Out-of-band provider's claims about group membership
+
+The first two pieces of information would be asserted by Okta/Auth0 and the second two would be asserted independently by the out-of-band provider. These two independent assertions are key to providing a higher level of security.
+
+Initially the management of this second opinion group datastore would be a labor intensive/manual process based on the assumption that changes to group membership would be infrequent and the number of groups would be small. The labor of this process would be due to the fact that we could not use any existing authentication system to govern access to the datastore (for obvious reasons). This process, for example, could involve bugzilla tickets requesting changes that infosec team personnel manually rendered in the datastore. If changes to group membership became more frequent or more groups were added resulting in more frequent modifications to this datastore, a better administration process would need to be established.
+
+It may also be desirable to whitelist all high security relying parties (RPs which are doing a second opinion call that causes Duo MFA authentication) in Auth0 to prevent users from having to provide a Duo MFA code twice (once to Duo after authenticating to Auth0, and then a second time when the call to the out-of-band provider is made). Care would need to be taken so as to avoid a situation where the Auth0 whitelist incorrectly thinks that the RP will take care of Duo MFA authentication through a second opinion, and the RP incorrectly thinks that Auth0 will take care of Duo MFA authentication, thus resulting in a user not being prompted for their MFA code.
+
+#### Defense against a bad actor
+
+For this second opinion model to be effective the administrators of the second opinion system need to be distinct from the administrators of the primary authentication system (Okta/Auth0, LDAP). This is so that an administrator who's account is compromised or operates as a bad actor will not be able to bypass the other system.
+
+#### Pros and Cons
+
+* Pro : High security relying parties need only make two calls (to Auth0/Okta and to out-of-band provider), just as they do now (to Auth0/Okta and to Duo)
+* Pro : High security relying parties need only speak OIDC now instead of both OIDC and Duo API potentially simplifying RP code
+* Pro : An attacker would now have to compromise both systems or administrator accounts of both systems to gain access to a high security relying party. This would require compromising (Okta/Auth0 or LDAP or mozillians.org) and (out-of-band provider or Duo or second opinion datastore)
+* Con : The process of modifying the second opinion group datastore would be manual and not self-service
+* Con : The out-of-band provider would have to be developed
+
+#### The second opinion group datastore
+
+This datastore could be something as simple as a json file hosted on a server or in a sequestered/dedicated AWS account or a simple web service REST API in front of a database on a server or in a dedicated AWS account. We would most likely start with the simplest solution and then improve or change it if changes to group membership or the number of groups increased.
+
+### The Name
+
+The model is called "Second Opinion" as it provides an RP with a second opinion on the validity of a user in the same way that a patient would seek a second opinion from a physician.
+
 # Setup
 
 ## Create IAM Role for Lambda Function
